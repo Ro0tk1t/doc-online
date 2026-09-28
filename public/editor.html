@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>doc-online</title>
+    <link rel="stylesheet" href="/css/style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📝</text></svg>" />
+  </head>
+  <body class="workspace">
+    <header class="bar">
+      <a id="back" class="back" href="/" title="All documents">←</a>
+      <input id="title" class="title" maxlength="120" autocomplete="off" spellcheck="false" />
+      <span id="status" class="pill" data-state="connecting">connecting…</span>
+      <div class="peers">
+        <div id="peers" class="chips"></div>
+        <span id="peerCount" class="muted"></span>
+      </div>
+      <div class="share">
+        <button id="copy-edit" class="ghost" data-action="copy">share link</button>
+        <button id="copy-view" class="ghost" data-action="copy">read-only link</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <div id="open-list" hidden>
+      <a class="cta" href="/">Back to the document list</a>
+    </div>
+
+    <main id="editor" class="panes">
+      <aside id="outlinePane" class="pane outline-pane">
+        <div class="pane-label">
+          <span>outline</span>
+          <button id="outlineCollapse" class="ghost icon" title="Hide outline">«</button>
+        </div>
+        <ul id="outline" class="outline"></ul>
+        <p id="outlineEmpty" class="muted pad">Headings appear here as you add them.</p>
+      </aside>
+
+      <section class="pane doc-pane">
+        <nav id="toolbar" class="toolbar">
+          <button data-action="bold" title="Bold (Cmd/Ctrl+B)"><b>B</b></button>
+          <button data-action="italic" title="Italic (Cmd/Ctrl+I)"><i>I</i></button>
+          <button data-action="strike" title="Strikethrough"><s>S</s></button>
+          <button data-action="code" title="Inline code (Cmd/Ctrl+E)">&lt;&gt;</button>
+          <button data-action="link" title="Link (Cmd/Ctrl+K)">link</button>
+          <span class="sep"></span>
+          <button data-action="h1" title="Heading 1">H1</button>
+          <button data-action="h2" title="Heading 2">H2</button>
+          <button data-action="quote" title="Quote">"</button>
+          <button data-action="bullet" title="Bullet list">•</button>
+          <button data-action="numbered" title="Numbered list">1.</button>
+          <button data-action="plain" title="Body text">p</button>
+          <span class="sep"></span>
+          <button data-action="divider" title="Horizontal rule">—</button>
+          <button data-action="codeblock" title="Code block">block</button>
+          <button data-action="table" title="Insert table" aria-haspopup="true">table</button>
+          <button data-action="attach" title="Attach a file">attach</button>
+          <input id="attach" type="file" multiple hidden />
+        </nav>
+        <div id="table-picker" class="picker" hidden>
+          <div class="picker-grid" id="picker-grid"></div>
+          <div class="picker-label" id="picker-label">1 × 1</div>
+        </div>
+        <nav id="tableBar" class="toolbar table-bar" hidden>
+          <span class="muted">table</span>
+          <button data-cell="row-above" title="Insert row above">＋row↑</button>
+          <button data-cell="row-below" title="Insert row below">＋row↓</button>
+          <button data-cell="col-before" title="Insert column left">＋col←</button>
+          <button data-cell="col-after" title="Insert column right">＋col→</button>
+          <span class="sep"></span>
+          <button data-cell="row-delete" title="Delete row">−row</button>
+          <button data-cell="col-delete" title="Delete column">−col</button>
+          <span class="sep"></span>
+          <button data-cell="align-left" title="Align left">⬅</button>
+          <button data-cell="align-center" title="Align center">↔</button>
+          <button data-cell="align-right" title="Align right">➡</button>
+          <span class="sep"></span>
+          <button data-cell="copy-tsv" title="Copy as tab-separated values">copy</button>
+        </nav>
+        <div id="stage" class="stage">
+          <div
+            id="doc"
+            class="markdown doc"
+            contenteditable="true"
+            spellcheck="false"
+            data-hint="Start writing — the toolbar and Cmd/Ctrl shortcuts format as you type."
+          ></div>
+        </div>
+      </section>
+
+      <aside id="filesPane" class="pane files-pane" hidden>
+        <div class="pane-label">
+          attachments
+          <button id="files-close" class="ghost icon" title="Hide">✕</button>
+        </div>
+        <ul id="files" class="files"></ul>
+        <p id="filesEmpty" class="muted pad">Nothing attached yet. Drop a file on the editor, paste an image, or use attach.</p>
+      </aside>
+    </main>
+
+    <footer class="bar footer">
+      <span id="stats" class="muted"></span>
+      <div class="export">
+        <a id="export-md" class="ghost" download>export .md</a>
+        <a id="export-doc" class="ghost" download>export .doc</a>
+      </div>
+      <button id="files-toggle" class="ghost" data-action="toggle-files">attachments <span id="files-count">0</span></button>
+      <span class="muted grow">What you type is what everyone sees · Markdown is the shared document underneath</span>
+    </footer>
+
+    <script type="module" src="/js/editor.js"></script>
+  </body>
+</html>

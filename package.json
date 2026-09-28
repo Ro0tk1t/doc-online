@@ -1,0 +1,19 @@
+{
+  "name": "doc-online",
+  "version": "0.1.0",
+  "description": "Real-time multiplayer Markdown document editor with a hand-rolled OT engine",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test shared/*.test.mjs test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

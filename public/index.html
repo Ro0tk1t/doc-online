@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>doc-online</title>
+    <link rel="stylesheet" href="/css/style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📝</text></svg>" />
+  </head>
+  <body class="lobby">
+    <header class="hero">
+      <h1>doc-online</h1>
+      <p>Real-time collaborative Markdown. Every keystroke is an operational transform, so nobody overwrites anybody.</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Start a document</h2>
+        <form id="create" class="create">
+          <input id="new-title" placeholder="Untitled document" maxlength="80" autocomplete="off" />
+          <button type="submit">New document</button>
+        </form>
+        <p class="hint">
+          Your display name:
+          <input id="who" class="inline-name" maxlength="32" autocomplete="off" />
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Open a document by link</h2>
+        <p class="hint">Paste a share link, or open one from the list below.</p>
+        <form id="open-form" class="create">
+          <input id="open-doc" placeholder="doc id or full link" autocomplete="off" />
+          <button type="submit" class="ghost">Open</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Documents <span id="count" class="muted"></span></h2>
+        <ul id="docs" class="docs">
+          <li class="muted">Loading…</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      <code>node server.js</code> · <a href="/api/docs">/api/docs</a> · self-hosted, no accounts
+    </footer>
+    <script type="module" src="/js/lobby.js"></script>
+  </body>
+</html>
