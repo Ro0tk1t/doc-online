@@ -114,9 +114,68 @@ textarea:focus-visible {
   flex: 1;
 }
 
-.inline-name {
-  max-width: 220px;
-  margin-left: 6px;
+.hint {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.hint.error {
+  color: var(--danger);
+}
+
+input:disabled,
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.badge {
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #f2f2ef;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge[data-kind='owner'],
+.badge[data-kind='admin'] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  color: var(--accent);
+}
+
+.badge[data-kind='public'] {
+  border-color: color-mix(in srgb, #1a7f37 35%, var(--line));
+  background: color-mix(in srgb, #1a7f37 9%, var(--panel));
+  color: #1a7f37;
+}
+
+/* The quiet badge: you may read this, nothing more. */
+.badge[data-kind='weak'] {
+  border-style: dashed;
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.admin {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.admin .docs li {
+  gap: 10px;
+  padding: 8px 0;
 }
 
 .docs {
@@ -188,6 +247,7 @@ textarea:focus-visible {
 }
 
 .bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -305,6 +365,11 @@ textarea:focus-visible {
 .share {
   display: flex;
   gap: 6px;
+}
+
+/* The bar has a lot to say on one line; share labels are not allowed to wrap onto two. */
+.share button {
+  white-space: nowrap;
 }
 
 button[data-copied]::after {
@@ -443,7 +508,9 @@ button[data-copied]::after {
 .markdown h1,
 .markdown h2,
 .markdown h3,
-.markdown h4 {
+.markdown h4,
+.markdown h5,
+.markdown h6 {
   line-height: 1.3;
   margin: 1.5em 0 0.5em;
   letter-spacing: -0.01em;
@@ -461,6 +528,16 @@ button[data-copied]::after {
 
 .markdown h3 {
   font-size: 17px;
+}
+
+/* Body text is 15px: without these the UA sizes make h4 as tall as h2 and h6 tiny. */
+.markdown h4 {
+  font-size: 16px;
+}
+
+.markdown h5 {
+  font-size: 15px;
+  letter-spacing: 0;
 }
 
 .markdown p,
@@ -503,10 +580,61 @@ button[data-copied]::after {
   overflow: auto;
 }
 
+/* The chip layer floats over the plate; it is not in the contenteditable, so the document cannot see it. */
+.fence-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* A chip is a floating control, so it is not on the plate at all until the pointer comes to the top
+   of its block (`fence-chips.js` decides which block that was, and how deep "the top" is). `opacity`
+   carries the hiding rather than `display` or `visibility`, so a keyboard visitor can still tab to
+   one, and `:focus` lifts it the moment they do. It rides the block's first line, where a label next
+   to the code would go: the depth `fence-chips.js` hands to `top` is that line's middle, and this
+   lift puts the chip's own middle there. */
+.fence-lang {
+  position: absolute;
+  transform: translateY(-50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 4px;
+  border: 1px solid #444c56;
+  border-radius: 5px;
+  background: #2d333b;
+  color: #c9d1d9;
+}
+
+.fence-lang.hot,
+.fence-lang:hover,
+.fence-lang:focus {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+/* A read-only visitor gets the same chip, shown the same way, with the choosing taken away. */
+.fence-lang.hot[disabled],
+.fence-lang:hover[disabled],
+.fence-lang:focus[disabled] {
+  opacity: 0.65;
+}
+
 .markdown pre code {
   background: none;
   padding: 0;
   color: inherit;
+}
+
+/* Token colours arrive inline from `highlight.mjs`, so the `.doc` export keeps them; only the
+   italic comment is the page's own decoration. */
+.markdown .tok-cmt {
+  font-style: italic;
 }
 
 .markdown table {
@@ -570,9 +698,77 @@ button[data-copied]::after {
 }
 
 @media (max-width: 860px) {
-  .share {
+  /* The two copy buttons are a convenience; sharing itself stays reachable on a narrow screen. */
+  .share [data-action='copy'] {
     display: none;
   }
+}
+
+/* ---------- share panel ---------- */
+
+/* Hanging off the bottom edge of the bar it lives in, so it never needs a magic offset. */
+.share-panel {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 14px;
+  z-index: 30;
+  width: min(340px, calc(100vw - 28px));
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 30px rgba(20, 22, 26, 0.12);
+  padding: 12px 14px 14px;
+}
+
+.share-panel .field {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.share-panel .field span {
+  flex: none;
+}
+
+.share-panel select,
+.share-panel input {
+  flex: 1;
+  min-width: 0;
+}
+
+.share-panel input {
+  flex: 2;
+}
+
+.grants {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.grants li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.grants li:first-child {
+  border-top: 0;
+}
+
+.grant-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grants .grant.owner .grant-name {
+  font-weight: 600;
 }
 
 /* ---------- table picker and table bar ---------- */

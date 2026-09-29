@@ -22,10 +22,11 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ESCAPES[c]);
 // Word ignores external CSS, so the elements the renderer emits get styled inline.
 const WORD_CSS = [
   'body { font-family: Calibri, Carlito, sans-serif; font-size: 11pt; }',
-  'h1 { font-size: 20pt; } h2 { font-size: 16pt; } h3 { font-size: 13pt; } h4, h5, h6 { font-size: 11pt; }',
+  'h1 { font-size: 20pt; } h2 { font-size: 16pt; } h3 { font-size: 13pt; } h4 { font-size: 12pt; } h5 { font-size: 11pt; } h6 { font-size: 10pt; }',
   'blockquote { margin-left: 24pt; padding-left: 12pt; border-left: 2.25pt solid #b8b8b8; color: #525252; }',
   'code { font-family: Consolas, "Courier New", monospace; background-color: #f2f2f2; }',
-  'pre { font-family: Consolas, "Courier New", monospace; background-color: #f2f2f2; padding: 6pt; }',
+  // The fence keeps the surface's dark plate: the token colours the renderer writes are cut for it.
+  'pre { font-family: Consolas, "Courier New", monospace; background-color: #22272e; color: #e6e6e6; padding: 6pt; }',
   'table { border-collapse: collapse; }',
   'th, td { border: 0.5pt solid #767676; padding: 3pt 6pt; text-align: left; }',
 ].join('\n');

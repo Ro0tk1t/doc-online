@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { renderMarkdown } from '../public/js/markdown.mjs';
 import { serializeTable, makeTable } from '../public/js/table.mjs';
 import { offsetOf, positionOf, serializeDocument, tableState, toMarkdown } from '../public/js/serialize.mjs';
+import { linesSpan, planReplace } from '../public/js/blocks.mjs';
+
+const FENCE = '```js\n';
 import { el, parse, textNodes, txt } from './dom-stub.mjs';
 
 /** What the browser holds after innerHTML = renderMarkdown(text): the round trip under test. */
@@ -188,4 +191,41 @@ test('a block mark covers its closing marker, so inserts never split it', () => 
     assert.equal(end, text.length, `${block.tagName} ends before its last marker`);
     assert.equal(offsetOf(marks, block, block.childNodes.length), text.length);
   }
+});
+
+test('a fence the browser split into div lines keeps its breaks', () => {
+  assert.equal(toMarkdown(parse('<pre><code class="language-js"><div>fn()</div><div>x = 1</div></code></pre>')), '```js\nfn()\nx = 1\n```');
+  assert.equal(toMarkdown(parse('<pre><code>a<div>b</div></code></pre>')), '```\na\nb\n```');
+  assert.equal(toMarkdown(parse('<pre><code><div>a</div><div><br></div><div>b</div></code></pre>')), '```\na\n\nb\n```');
+});
+
+test('a caret after a typed break in a fence reads as the line it sits on', () => {
+  const root = parse('<pre><code class="language-js">let a = 1;<br><br></code></pre>');
+  const { text, marks } = serializeDocument(root);
+  assert.equal(text, '```js\nlet a = 1;\n\n```');
+  const code = root.childNodes[0].childNodes[0];
+  // Between the two breaks the caret belongs to the empty line, not to the code above it: that is
+  // where the break that leaves the block is decided from.
+  assert.equal(offsetOf(marks, code, 1), text.indexOf('\n\n'));
+  assert.equal(offsetOf(marks, code, 2), text.indexOf('\n\n') + 1);
+});
+
+test('an inline code span never carries a line break into the model', () => {
+  assert.equal(toMarkdown(parse('<p><code>line one\n\nline two</code></p>')), '`line one line two`');
+});
+
+test('an emptied code span writes no backticks, because nothing closes them', () => {
+  assert.equal(toMarkdown(parse('<p>a <code></code> b</p>')), 'a  b');
+  assert.equal(toMarkdown(parse('<p><code>hello</code></p><p><code><br></code></p>')), '`hello`\n\n');
+  // A break through the middle of a span closes it first: the tail is plain text on its own line.
+  assert.equal(through('aa `b`\n\ncdef gh'), 'aa `b`\n\ncdef gh');
+});
+
+test('lines turned into a fence round-trip unchanged', () => {
+  const text = 'top\n\nsel one\nsel two\n\nend\n';
+  const span = linesSpan(text, text.indexOf('one'), text.indexOf('two') + 3);
+  const plan = planReplace(text, span.start, span.end, '```js\n' + text.slice(span.start, span.end) + '\n```');
+  assert.equal(plan.text, 'top\n\n```js\nsel one\nsel two\n```\n\nend\n');
+  assert.equal(through(plan.text), plan.text.trimEnd());
+  assert.equal(plan.content + FENCE.length, plan.text.indexOf('sel one'));
 });

@@ -34,10 +34,9 @@ function timeAgo(at) {
 const isImage = (file) => /^image\//.test(file.type ?? '');
 
 export class Attachments {
-  constructor({ session, source, viewOnly, insert, notify }) {
+  constructor({ session, source, insert, notify }) {
     this.session = session;
     this.source = source;
-    this.viewOnly = viewOnly;
     this.insert = insert;
     this.notify = notify;
     this.files = [];
@@ -56,29 +55,29 @@ export class Attachments {
     });
     this.list.addEventListener('click', (event) => this.#act(event));
 
-    if (!viewOnly) {
-      source.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        source.closest('.pane').classList.add('dropping');
-      });
-      source.addEventListener('dragleave', () => source.closest('.pane').classList.remove('dropping'));
-      source.addEventListener('drop', (event) => {
-        const dropped = [...(event.dataTransfer?.files ?? [])];
-        if (!dropped.length) return;
-        event.preventDefault();
-        source.closest('.pane').classList.remove('dropping');
-        this.upload(dropped);
-      });
-      source.addEventListener('paste', (event) => {
-        const pasted = [...(event.clipboardData?.items ?? [])]
-          .filter((item) => item.kind === 'file')
-          .map((item) => item.getAsFile())
-          .filter(Boolean);
-        if (!pasted.length) return;
-        event.preventDefault();
-        this.upload(pasted);
-      });
-    }
+    // Dropped and pasted files are refused by `upload`, not by leaving the handlers unwired:
+    // whether this tab may write is an answer the server gives after construction.
+    source.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      source.closest('.pane').classList.add('dropping');
+    });
+    source.addEventListener('dragleave', () => source.closest('.pane').classList.remove('dropping'));
+    source.addEventListener('drop', (event) => {
+      const dropped = [...(event.dataTransfer?.files ?? [])];
+      if (!dropped.length) return;
+      event.preventDefault();
+      source.closest('.pane').classList.remove('dropping');
+      this.upload(dropped);
+    });
+    source.addEventListener('paste', (event) => {
+      const pasted = [...(event.clipboardData?.items ?? [])]
+        .filter((item) => item.kind === 'file')
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
+      if (!pasted.length) return;
+      event.preventDefault();
+      this.upload(pasted);
+    });
   }
 
   open(on = true) {
@@ -103,7 +102,9 @@ export class Attachments {
   }
 
   async upload(list) {
-    if (this.viewOnly) return this.notify('View-only links cannot upload.', 'warn');
+    if (this.session.viewOnly) {
+      return this.notify(this.session.access?.intent === 'view' ? 'View-only links cannot attach files.' : 'Attaching files needs editing rights.', 'warn');
+    }
     const accepted = [];
     for (const file of list) {
       if (file.size > MAX_PREVIEW && isImage(file)) this.notify(`${file.name} is too large to preview, storing it as a file.`, 'info');
@@ -195,7 +196,7 @@ export class Attachments {
       copy.dataset.role = 'copy';
       copy.textContent = 'link';
       actions.append(copy);
-      if (!this.viewOnly) {
+      if (!this.session.viewOnly) {
         const drop = document.createElement('button');
         drop.className = 'ghost';
         drop.dataset.role = 'delete';

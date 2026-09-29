@@ -15,12 +15,13 @@ import { renderMarkdown } from './markdown.mjs';
 import { Attachments } from './attachments.js';
 import { makeTable, serializeTable, toTsv } from './table.mjs';
 import { offsetOf, positionOf, serializeDocument, tableState } from './serialize.mjs';
-import { planInsert } from './blocks.mjs';
+import { linesSpan, planFenceExit, planInsert, planReplace, setFenceLanguage } from './blocks.mjs';
+import { FenceChips } from './fence-chips.js';
 import { Outline } from './outline.js';
+import { Sharing } from './sharing.js';
 
 const params = new URLSearchParams(location.search);
 const docId = params.get('doc');
-const viewOnly = params.get('mode') === 'view';
 
 const el = (id) => document.getElementById(id);
 const ui = {
@@ -36,6 +37,8 @@ const ui = {
   editor: el('editor'),
   tableBar: el('tableBar'),
   tablePicker: el('table-picker'),
+  role: el('role'),
+  signIn: el('sign-in'),
 };
 
 if (!docId) {
@@ -43,25 +46,25 @@ if (!docId) {
   throw new Error('no document id');
 }
 
+/** Just the tab's own id: who I am is the server's business, and it answers in `access`. */
 function identity() {
   let clientId = localStorage.getItem('doc-online:client');
   if (!clientId) {
     clientId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
     localStorage.setItem('doc-online:client', clientId);
   }
-  let name = localStorage.getItem('doc-online:name') ?? '';
-  if (!name) {
-    name = `Guest ${clientId.slice(0, 4)}`;
-    localStorage.setItem('doc-online:name', name);
-  }
-  return { clientId, name };
+  return clientId;
 }
 
-const me = identity();
-const session = new Session({ ...me, docId, viewOnly });
-const cursors = new CursorLayer(ui.stage, ui.doc, me.clientId);
-const attachments = new Attachments({ session, source: ui.doc, viewOnly, insert: insertMarkdown, notify: notice });
+const clientId = identity();
+// A read-only link is a wish, not a right: it narrows what this tab does, the server decides the rest.
+const session = new Session({ docId, clientId, linkViewOnly: params.get('mode') === 'view' });
+const readOnly = () => session.viewOnly;
+const cursors = new CursorLayer(ui.stage, ui.doc, clientId);
+const chips = new FenceChips(ui.stage, ui.doc, { onPick: pickFenceLanguage, editable: () => !readOnly() });
+const attachments = new Attachments({ session, source: ui.doc, insert: insertMarkdown, notify: notice });
 const outline = new Outline({ docId, onJump: jumpToHeading });
+const sharing = new Sharing({ docId, notify: notice });
 
 let peers = [];
 let typingUntil = 0;
@@ -90,13 +93,10 @@ function invalidate() {
 function paint(text) {
   shown = text;
   invalidate();
-  const blank = viewOnly ? false : !text.trim();
+  const blank = readOnly() ? false : !text.trim();
   ui.doc.innerHTML = blank ? '<p><br></p>' : renderMarkdown(text);
   ui.doc.dataset.blank = String(blank);
-}
-
-function escapeHtml(src) {
-  return String(src).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  chips.render(text); // the blocks the surface just became are the blocks the chips hang on
 }
 
 /** Put the DOM caret at a Markdown offset pair. */
@@ -156,10 +156,11 @@ function jumpToHeading(start) {
 function publish({ kind = 'edit' } = {}) {
   invalidate();
   const after = value();
-  if (!viewOnly) ui.doc.dataset.blank = String(!after.trim());
+  if (!readOnly()) ui.doc.dataset.blank = String(!after.trim());
   if (after !== session.text) {
     session.localEdit(session.text, after);
     shown = after;
+    noteFenceEdit(); // the browser's own DOM stands in; a pause in the keystrokes repaints it
     pushHistory(after, kind);
   }
   renderStats();
@@ -194,6 +195,43 @@ function insertMarkdown(md, settle = null) {
   const plan = planInsert(session.text, blockEndForCaret() ?? caret.end, md);
   commitText(plan.text, { start: plan.end, end: plan.end });
   settle?.(plan.content);
+}
+
+/**
+ * A chip chose a language. The info string is the only place a fence can keep one, so the write goes
+ * through the model: it travels as an ordinary operation, and every other tab repaints from it.
+ */
+function pickFenceLanguage(at, info) {
+  const next = setFenceLanguage(session.text, at, info);
+  if (next === session.text) return;
+  readCaret();
+  const delta = next.length - session.text.length;
+  const shift = (position) => (position > at ? position + delta : position);
+  commitText(next, { start: shift(caret.start), end: shift(caret.end) });
+}
+
+const FENCE_HEAD = '```js\n';
+
+/**
+ * The code block button. With selected text it takes the whole lines the selection touches and
+ * puts them inside the fence; with the caret resting on a line it adds an empty block below,
+ * because swallowing the sentence the caret happens to sit in would be a destructive surprise.
+ * Either way the caret ends up inside the fence, so the next keystroke is code.
+ */
+function toCodeBlock() {
+  const host = blockHost();
+  if (host) return notice(`Code blocks do not apply inside ${host}.`, 'warn');
+  readCaret();
+  const inside = (content, body) => placeCaret(content + FENCE_HEAD.length + body.length, content + FENCE_HEAD.length + body.length);
+  if (caret.end <= caret.start) {
+    return insertMarkdown(`${FENCE_HEAD}\n\`\`\`\n`, (content) => inside(content, ''));
+  }
+  const span = linesSpan(session.text, caret.start, caret.end);
+  const body = session.text.slice(span.start, span.end);
+  const plan = planReplace(session.text, span.start, span.end, `${FENCE_HEAD}${body}\n\`\`\``);
+  commitText(plan.text, { start: plan.end, end: plan.end });
+  inside(plan.content, body);
+  return null;
 }
 
 /* ---------- undo / redo ---------- */
@@ -284,19 +322,22 @@ function renderStats() {
 }
 
 function renderPeers() {
-  const others = peers.filter((peer) => peer.clientId !== me.clientId);
+  // My own chip carries the name the server answered with -- for a signed-in peer that is the
+  // account name, and nothing this tab could type reaches anybody else.
+  const self = peers.find((peer) => peer.clientId === clientId);
+  const others = peers.filter((peer) => peer.clientId !== clientId);
   ui.peers.innerHTML = '';
   const mineChip = document.createElement('span');
   mineChip.className = 'chip';
-  mineChip.style.setProperty('--c', me.color ?? '#3e63dd');
-  mineChip.textContent = me.name;
+  mineChip.style.setProperty('--c', self?.color ?? '#3e63dd');
+  mineChip.textContent = self?.name ?? 'You';
   ui.peers.appendChild(mineChip);
   for (const peer of others) {
     const chip = document.createElement('span');
     chip.className = 'chip';
     chip.style.setProperty('--c', peer.color);
     chip.dataset.typing = peer.typing ? 'true' : 'false';
-    chip.title = viewOnly ? `${peer.name} is editing` : peer.name;
+    chip.title = readOnly() ? `${peer.name} is editing` : peer.name;
     chip.textContent = peer.name + (peer.typing ? ' ✎' : '');
     ui.peers.appendChild(chip);
   }
@@ -353,6 +394,77 @@ ui.doc.addEventListener('compositionend', () => {
   else commitText(next, caret, { kind: 'typing' }); // a peer edit landed mid-composition
 });
 
+/**
+ * Highlighting belongs to the renderer, so a line that was just typed is flat until the surface is
+ * read back as Markdown. Waiting for the caret to leave the fence made a whole block of code stay
+ * colourless while somebody was writing it, so the pause after a keystroke settles it instead. The
+ * repaint is scoped to a fence having been edited: prose the caret rests in is left alone.
+ */
+const QUIET_MS = 450;
+let fenceEdited = false;
+let quietTimer = null;
+
+/** Called for every edit that reaches the model: a fence owns the colours to catch up. */
+function noteFenceEdit() {
+  const node = document.getSelection()?.anchorNode;
+  const element = node ? (node.nodeType === 3 ? node.parentElement : node) : null;
+  if (!element?.closest?.('pre')) return;
+  fenceEdited = true;
+  clearTimeout(quietTimer);
+  quietTimer = setTimeout(settleFence, QUIET_MS);
+}
+
+/** Repaint the fenced text from the model, and put the caret back where it was. */
+function settleFence() {
+  if (!fenceEdited || composing) return;
+  fenceEdited = false;
+  const sel = document.getSelection();
+  const inside = Boolean(sel && ui.doc.contains(sel.anchorNode));
+  paint(session.text);
+  // Only restore a caret that is still ours; a click outside the surface is the user's business.
+  if (inside) placeCaret(Math.min(caret.start, session.text.length), Math.min(caret.end, session.text.length), { focus: false });
+}
+
+/**
+ * The line break that leaves a code block. Inside a fence Enter belongs to the code, so it is the
+ * second Enter on an empty line that gets out -- `planFenceExit` owns that arithmetic and says no
+ * until the caret is on a blank line with nothing below it.
+ *
+ * Leaving the last block asks for a caret position Markdown cannot hold: an empty paragraph after
+ * the final block does not survive a round trip, and one written into the model would be a line the
+ * document never asked for. So the surface keeps it instead -- a `<p>` with nothing in it, which the
+ * serializer drops while it stays empty and turns into prose the moment it is typed into.
+ */
+function exitFence() {
+  const sel = document.getSelection();
+  const node = sel?.anchorNode;
+  if (!node || !sel.isCollapsed || !ui.doc.contains(node)) return false;
+  const element = node.nodeType === 3 ? node.parentElement : node;
+  if (!element?.closest?.('pre')) return false;
+  const at = offsetOf(snapshot().marks, node, sel.anchorOffset);
+  if (at == null) return false;
+  const plan = planFenceExit(session.text, at);
+  if (!plan) return false;
+
+  clearTimeout(quietTimer); // the block that was settling is not the one under the caret now
+  fenceEdited = false;
+  commitText(plan.text, { start: plan.end, end: plan.end });
+  if (plan.end < plan.text.length) return true;
+
+  let room = ui.doc.lastElementChild;
+  if (room?.nodeName !== 'P' || room.textContent) {
+    room = document.createElement('p');
+    room.appendChild(document.createElement('br'));
+    ui.doc.appendChild(room);
+  }
+  const spot = document.createRange();
+  spot.setStart(room, 0);
+  spot.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(spot);
+  return true;
+}
+
 document.addEventListener('selectionchange', () => {
   if (!ui.doc.contains(document.getSelection()?.anchorNode)) return;
   readCaret();
@@ -373,6 +485,52 @@ function blockHost() {
   return host.tagName === 'PRE' ? 'a code block' : 'a table cell';
 }
 
+/**
+ * A line break ends an inline code span, because Markdown gives one no delimiter that survives
+ * going around it: left to the browser, Enter dragged the `<code>` element onto the new line, so
+ * prose typed there came out formatted as code, and breaking an empty span left stray backticks.
+ * Close the span at the caret instead, and let whatever follows carry on as plain text.
+ */
+function endInlineCodeAtCaret() {
+  const sel = document.getSelection();
+  const node = sel?.anchorNode;
+  if (!node || !ui.doc.contains(node)) return false;
+  const code = (node.nodeType === 3 ? node.parentElement : node)?.closest?.('code');
+  if (!code || code.closest('pre')) return false;
+
+  const marks = snapshot().marks;
+  const span = marks.get(code);
+  const at = offsetOf(marks, node, sel.anchorOffset);
+  const inside = Boolean(span) && at != null && at > span.start && at < span.end;
+
+  const parent = code.parentNode;
+  const index = [...parent.childNodes].indexOf(code);
+  let moved = null;
+
+  if (inside) {
+    const rest = document.createRange();
+    rest.selectNodeContents(code);
+    rest.setStart(node, sel.anchorOffset);
+    const tail = rest.extractContents();
+    // Read the reference before the fragment moves into the document: once it lands, `tail` is empty
+    // and its first child belongs to the paragraph now.
+    moved = tail.firstChild;
+    if (moved) code.after(tail);
+    if (!code.textContent) code.remove(); // an emptied span would only write backticks for nothing
+  }
+
+  const spot = document.createRange();
+  const past = Boolean(span) && at != null && at >= span.end;
+  if (moved) spot.setStartBefore(moved); // the break lands between the closed span and its tail
+  else if (code.isConnected && (inside || past)) spot.setStartAfter(code);
+  else if (code.isConnected) spot.setStartBefore(code); // a caret on either seam: break around the span
+  else spot.setStart(parent, Math.min(index, parent.childNodes.length));
+  spot.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(spot);
+  return true;
+}
+
 function exec(command, arg) {
   if (BLOCK_COMMANDS.has(command)) {
     const host = blockHost();
@@ -385,10 +543,27 @@ function exec(command, arg) {
   publish({ kind: 'edit' });
 }
 
+/**
+ * Inline code is written into the model, not into the DOM. `execCommand('insertHTML')` hands back
+ * a `<span>` with the colours folded into inline style, which the serializer reads as plain text:
+ * the span looked like code for one repaint and then was gone. Markdown decides what a code span
+ * is, so Markdown is where it belongs -- and pressing the command again takes it back off.
+ */
 function wrapCode() {
-  const sel = document.getSelection();
-  const label = sel && !sel.isCollapsed ? sel.toString() : 'code';
-  exec('insertHTML', `<code>${escapeHtml(label)}</code>`);
+  readCaret(); // the model's own offsets, not the browser's rendering of the selection
+  const { start, end } = caret;
+  const text = session.text;
+  if (start === end) {
+    return commitText(`${text.slice(0, start)}\`code\`${text.slice(end)}`, { start: start + 1, end: start + 5 });
+  }
+  const selected = text.slice(start, end);
+  // A code span has no line break in it: more than one line is a code block asking to happen.
+  if (selected.includes('\n')) return toCodeBlock();
+  if (selected.includes('`')) return notice('A code span cannot hold a backtick.', 'warn');
+  if (text[start - 1] === '`' && text[end] === '`') {
+    return commitText(`${text.slice(0, start - 1)}${selected}${text.slice(end + 1)}`, { start: start - 1, end: end - 1 });
+  }
+  return commitText(`${text.slice(0, start)}\`${selected}\`${text.slice(end)}`, { start: start + 1, end: end + 1 });
 }
 
 function makeLink() {
@@ -410,12 +585,15 @@ const ACTIONS = {
   link: makeLink,
   h1: () => asBlock('h1'),
   h2: () => asBlock('h2'),
+  h3: () => asBlock('h3'),
+  h4: () => asBlock('h4'),
+  h5: () => asBlock('h5'),
   quote: () => asBlock('blockquote'),
   plain: () => asBlock('p'),
   bullet: () => exec('insertUnorderedList'),
   numbered: () => exec('insertOrderedList'),
   divider: () => insertMarkdown('---\n'),
-  codeblock: () => insertMarkdown('```js\n\n```\n'),
+  codeblock: toCodeBlock,
   table: toggleTablePicker,
   attach: () => el('attach').click(),
 };
@@ -440,7 +618,7 @@ function cellAtCaret() {
 }
 
 function renderTableBar() {
-  const here = viewOnly ? null : cellAtCaret();
+  const here = readOnly() ? null : cellAtCaret();
   ui.tableBar.hidden = !here;
   for (const active of ui.doc.querySelectorAll('.cell-active')) active.classList.remove('cell-active');
   if (here) here.cell.classList.add('cell-active');
@@ -632,7 +810,7 @@ document.addEventListener('click', (event) => {
 ui.toolbar.addEventListener('mousedown', (event) => event.preventDefault());
 ui.toolbar.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-action]');
-  if (!button || viewOnly) return;
+  if (!button || readOnly()) return;
   ACTIONS[button.dataset.action]?.();
 });
 
@@ -659,8 +837,8 @@ function walkCell(backwards) {
 }
 
 ui.doc.addEventListener('keydown', (event) => {
-  if (viewOnly) return;
-  const mod = event.metaKey || event.ctrlKey;
+  if (readOnly()) return;
+  const mod= event.metaKey || event.ctrlKey;
   if (mod && !event.altKey) {
     const key = event.key.toLowerCase();
     if (key === 'z') {
@@ -693,12 +871,24 @@ ui.doc.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && cellAtCaret()) {
     event.preventDefault();
     walkCell(false);
+    return;
+  }
+  // A break inside a fence is code, except the one that gets out of it.
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !composing && exitFence()) {
+    event.preventDefault();
+    return;
+  }
+  // Enter inside an inline span goes through us, not the browser: a code element that survives the
+  // break formats the next line as code. Composition is the input method's business, not ours.
+  if (event.key === 'Enter' && !event.isComposing && !composing && endInlineCodeAtCaret()) {
+    event.preventDefault();
+    exec('insertParagraph');
   }
 });
 
 /** Plain text only: pasted markup would bring a stranger's structure into the document. */
 ui.doc.addEventListener('paste', (event) => {
-  if (viewOnly) return event.preventDefault();
+  if (readOnly()) return event.preventDefault();
   const text = event.clipboardData?.getData('text/plain');
   if (text == null) return;
   event.preventDefault();
@@ -709,7 +899,7 @@ ui.doc.addEventListener('paste', (event) => {
 /* ---------- session wiring ---------- */
 
 session.addEventListener('doc', (event) => {
-  const { title, text, users, files, isStale, carried } = event.detail;
+  const { title, text, users, files, isStale, carried, accessChanged, reason } = event.detail;
   if (files) attachments.setFiles(files);
   ui.title.value = title;
   document.title = `${title} · doc-online`;
@@ -720,12 +910,31 @@ session.addEventListener('doc', (event) => {
   history.index = 0;
   peers = users ?? peers;
   lostEdit = carried && carried.length ? { before: text, after: apply(text, carried) } : null;
-  if (isStale) banner(lostEdit ? 'Re-synced with the server. Your unsent edit is waiting below.' : 'Re-synced with the server.', 'info');
+  // A share change reaches me as a re-sync with a reason, so the sentence explains itself.
+  if (isStale && reason) banner(`${reason}. ${lostEdit ? 'Your unsent edit is waiting below.' : ''}`.trim(), 'info');
+  else if (isStale) banner(lostEdit ? 'Re-synced with the server. Your unsent edit is waiting below.' : 'Re-synced with the server.', 'info');
   else banner('');
+  if (accessChanged) applyAccess();
   renderPeers();
   renderStats();
   refreshPresence();
 });
+
+/** Say with the surface what the server just said about my rights. */
+function applyAccess() {
+  const access = session.access;
+  ui.doc.setAttribute('contenteditable', String(!readOnly()));
+  ui.toolbar.hidden = readOnly();
+  ui.title.readOnly = readOnly();
+  sharing.setAccess(access);
+  attachments.setFiles(session.files); // the remove buttons belong to editors only
+  ui.role.textContent = access.role === 'reader' ? 'read-only' : access.role;
+  ui.role.dataset.kind = access.role === 'owner' ? 'owner' : access.role === 'editor' ? 'role' : 'weak';
+  ui.role.hidden = false;
+  // Anonymous peers only ever land here on a public document, so the badge is the whole story.
+  ui.signIn.hidden = access.role !== 'reader';
+  ui.signIn.href = `/?doc=${encodeURIComponent(docId)}`;
+}
 
 let repaint = 0;
 
@@ -751,8 +960,6 @@ session.addEventListener('files', (event) => attachments.setFiles(event.detail.f
 
 session.addEventListener('users', (event) => {
   peers = event.detail.users;
-  const self = peers.find((peer) => peer.clientId === me.clientId);
-  if (self) me.color = self.color;
   renderPeers();
   refreshPresence();
 });
@@ -767,13 +974,30 @@ session.addEventListener('ack', () => renderStats());
 session.addEventListener('status', (event) => setStatus(event.detail.status));
 
 session.addEventListener('error', (event) => {
-  if (event.detail.code === 'not_found') {
+  const { code, message } = event.detail;
+  if (code === 'not_found') {
     banner('This document no longer exists.', 'warn');
     ui.editor.hidden = true;
     el('open-list').hidden = false;
     return;
   }
-  banner(event.detail.message, 'warn');
+  // The socket is shut, so there is nothing to keep open: send the reader to the lobby,
+  // which is where a name and a password can actually be typed.
+  if (code === 'need_login' || code === 'forbidden') {
+    banner(message, 'warn');
+    ui.editor.hidden = true;
+    const list = el('open-list');
+    list.hidden = false;
+    list.replaceChildren(
+      Object.assign(document.createElement('a'), {
+        className: 'cta',
+        href: `/?doc=${encodeURIComponent(docId)}`,
+        textContent: code === 'need_login' ? 'Sign in to open this document' : 'Back to the document list',
+      }),
+    );
+    return;
+  }
+  banner(message, 'warn');
 });
 
 session.addEventListener('kicked', () => {
@@ -787,7 +1011,7 @@ let renameTimer = 0;
 ui.title.addEventListener('input', () => {
   document.title = `${ui.title.value} · doc-online`;
   clearTimeout(renameTimer);
-  if (viewOnly) return;
+  if (readOnly()) return;
   renameTimer = setTimeout(() => session.rename(ui.title.value), 500);
 });
 
@@ -829,19 +1053,22 @@ for (const [id, format] of [
   const link = el(id);
   link.href = `/api/docs/${encodeURIComponent(docId)}/export?format=${format}`;
   link.addEventListener('click', (event) => {
-    if (viewOnly || session.text.trim()) return;
+    if (readOnly() || session.text.trim()) return;
     event.preventDefault();
     notice('Nothing to export yet.', 'info');
   });
 }
 
-if (viewOnly) {
-  ui.doc.setAttribute('contenteditable', 'false');
-  ui.toolbar.hidden = true;
-}
+// Until the first snapshot answers, the surface is a reader's: nothing here is editable.
+ui.doc.setAttribute('contenteditable', 'false');
+ui.toolbar.hidden = true;
+ui.title.readOnly = true;
 
 window.addEventListener('beforeunload', () => session.close());
 
 setStatus('connecting');
 session.connect();
-new ResizeObserver(() => cursors.resize()).observe(ui.doc);
+new ResizeObserver(() => {
+  cursors.resize();
+  chips.resize();
+}).observe(ui.doc);

@@ -14,16 +14,42 @@
     </header>
 
     <main>
+      <section class="card" id="account">
+        <div id="signed-out">
+          <h2>Sign in</h2>
+          <p class="hint" id="first-user" hidden>
+            No accounts on this server yet. The first one to sign up becomes the admin.
+          </p>
+          <form id="auth" class="create">
+            <input id="auth-name" placeholder="Name" maxlength="32" autocomplete="username" />
+            <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password" />
+            <button type="submit" data-action="login">Log in</button>
+            <button type="submit" class="ghost" data-action="signup">Sign up</button>
+          </form>
+          <p class="hint error" id="auth-error" hidden></p>
+        </div>
+
+        <div id="signed-in" hidden>
+          <p class="who">
+            Signed in as <strong id="me-name"></strong>
+            <span class="badge" id="me-role"></span>
+            <button id="logout" class="tiny ghost">Log out</button>
+          </p>
+        </div>
+
+        <div id="admin" class="admin" hidden>
+          <h2>Accounts</h2>
+          <ul id="admin-users" class="docs"></ul>
+        </div>
+      </section>
+
       <section class="card">
         <h2>Start a document</h2>
         <form id="create" class="create">
           <input id="new-title" placeholder="Untitled document" maxlength="80" autocomplete="off" />
           <button type="submit">New document</button>
         </form>
-        <p class="hint">
-          Your display name:
-          <input id="who" class="inline-name" maxlength="32" autocomplete="off" />
-        </p>
+        <p class="hint" id="create-hint" hidden>Writing takes an account; reading a public document does not.</p>
       </section>
 
       <section class="card">
@@ -44,7 +70,7 @@
     </main>
 
     <footer>
-      <code>node server.js</code> · <a href="/api/docs">/api/docs</a> · self-hosted, no accounts
+      <code>node server.js</code> · <a href="/api/docs">/api/docs</a> · self-hosted: accounts live in this server's data folder
     </footer>
     <script type="module" src="/js/lobby.js"></script>
   </body>

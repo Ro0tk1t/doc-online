@@ -12,13 +12,40 @@
       <a id="back" class="back" href="/" title="All documents">←</a>
       <input id="title" class="title" maxlength="120" autocomplete="off" spellcheck="false" />
       <span id="status" class="pill" data-state="connecting">connecting…</span>
+      <span id="role" class="badge" hidden></span>
+      <a id="sign-in" class="tiny" href="/" hidden>sign in to edit</a>
       <div class="peers">
         <div id="peers" class="chips"></div>
         <span id="peerCount" class="muted"></span>
       </div>
       <div class="share">
+        <button id="share-open" class="ghost" hidden>sharing</button>
         <button id="copy-edit" class="ghost" data-action="copy">share link</button>
         <button id="copy-view" class="ghost" data-action="copy">read-only link</button>
+      </div>
+
+      <div id="share-panel" class="share-panel" hidden>
+        <div class="pane-label">
+          sharing
+          <button id="share-close" class="ghost icon" title="Hide">✕</button>
+        </div>
+        <label class="field">
+          <span class="muted">access</span>
+          <select id="share-visibility">
+            <option value="private">private — only the people below</option>
+            <option value="public">public — anyone with the link can read</option>
+          </select>
+        </label>
+        <ul id="share-grants" class="grants"></ul>
+        <div class="field">
+          <input id="share-name" placeholder="add by account name" autocomplete="off" spellcheck="false" />
+          <select id="share-role">
+            <option value="editor">can edit</option>
+            <option value="viewer">can read</option>
+          </select>
+          <button id="share-add" class="tiny ghost">add</button>
+        </div>
+        <p id="share-note" class="muted" hidden></p>
       </div>
     </header>
 
@@ -48,6 +75,9 @@
           <span class="sep"></span>
           <button data-action="h1" title="Heading 1">H1</button>
           <button data-action="h2" title="Heading 2">H2</button>
+          <button data-action="h3" title="Heading 3">H3</button>
+          <button data-action="h4" title="Heading 4">H4</button>
+          <button data-action="h5" title="Heading 5">H5</button>
           <button data-action="quote" title="Quote">"</button>
           <button data-action="bullet" title="Bullet list">•</button>
           <button data-action="numbered" title="Numbered list">1.</button>

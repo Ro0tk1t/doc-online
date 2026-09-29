@@ -68,6 +68,8 @@ export class Room {
       revision: this.doc.revision,
       files: this.doc.files ?? [],
       updatedAt: this.doc.updatedAt,
+      owner: this.doc.owner ?? null,
+      visibility: this.doc.visibility === 'public' ? 'public' : 'private',
     };
   }
 

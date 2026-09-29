@@ -5,6 +5,8 @@
  * allowlist, so untrusted collaborator text cannot inject script here.
  */
 
+import { renderCode } from './highlight.mjs';
+
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ESCAPES[c]);
 
@@ -13,7 +15,12 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ESCAPES[c]);
 const GUARD = String.fromCodePoint(2);
 const SAFE_HREF = /^(?:https?:|mailto:|ftp:|#|\/|\.\/|\.\.\/)/i;
 const ITEM = /^(\s*)(?:[-*+]|\d{1,9}[.)])[ )]+(.*)$/;
-const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*([\w.+-]*)[ \t]*$/;
+
+/** A fence head: the marker, and the info string that names its language. */
+export const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*([\w.+-]*)[ \t]*$/;
+
+/** The line that ends a fence: at least as many of the same marker character, and nothing after. */
+export const fenceCloser = (marker) => new RegExp(`^ {0,3}\\${marker[0]}{${marker.length},}[ \\t]*$`);
 
 function href(raw) {
   const url = String(raw).trim();
@@ -163,7 +170,7 @@ function renderBlocks(lines) {
 
     const fence = FENCE.exec(line);
     if (fence) {
-      const closer = new RegExp(`^ {0,3}\\${fence[1][0]}{${fence[1].length},}[ \\t]*$`);
+      const closer = fenceCloser(fence[1]);
       const body = [];
       i += 1;
       while (i < lines.length && !closer.test(lines[i])) {
@@ -171,8 +178,11 @@ function renderBlocks(lines) {
         i += 1;
       }
       i += 1;
-      const lang = fence[2] ? ` class="language-${escapeHtml(fence[2])}"` : '';
-      out.push(`<pre><code${lang}>${escapeHtml(body.join('\n'))}\n</code></pre>`);
+      const raw = fence[2] ?? '';
+      const lang = raw ? ` class="language-${escapeHtml(raw)}"` : '';
+      // Every token span carries text that came out of `body`, so reading the block back with
+      // `serialize.mjs` returns the same Markdown: highlighting never enters the document.
+      out.push(`<pre><code${lang}>${renderCode(body.join('\n'), raw, escapeHtml)}\n</code></pre>`);
       continue;
     }
 

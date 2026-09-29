@@ -13,12 +13,15 @@ import { apply, makeEdit, transformPair } from '/shared/ot.mjs';
 const PRESENCE_INTERVAL = 80;
 
 export class Session extends EventTarget {
-  constructor({ docId, clientId, name, viewOnly = false }) {
+  constructor({ docId, clientId, linkViewOnly = false }) {
     super();
     this.docId = docId;
     this.clientId = clientId;
-    this.name = name;
-    this.viewOnly = viewOnly;
+    // `?mode=view` only ever narrows what this tab may do; the server's `access` block is
+    // what decides the rest, and it arrives with the first snapshot.
+    this.linkViewOnly = linkViewOnly;
+    this.viewOnly = linkViewOnly;
+    this.access = null;
     this.revision = 0;
     this.text = '';
     this.files = [];
@@ -41,15 +44,17 @@ export class Session extends EventTarget {
 
   connect() {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const params = new URLSearchParams({ doc: this.docId, client: this.clientId, name: this.name });
-    if (this.viewOnly) params.set('mode', 'view');
+    const params = new URLSearchParams({ doc: this.docId, client: this.clientId });
+    if (this.linkViewOnly) params.set('mode', 'view');
     this.ws = new WebSocket(`${scheme}://${location.host}/ws?${params}`);
     this.ws.onopen = () => {
       this.retry = 0;
       this.emit('status', { status: 'online' });
     };
     this.ws.onmessage = (event) => this.#onMessage(JSON.parse(event.data));
-    this.ws.onclose = () => {
+    this.ws.onclose = (event) => {
+      // 4003 is "your rights do not cover this": a reconnect would be refused again.
+      if (event.code === 4003) this.closed = true;
       this.emit('status', { status: 'offline' });
       if (!this.closed) this.#scheduleReconnect();
     };
@@ -96,6 +101,8 @@ export class Session extends EventTarget {
         this.closed = true;
         return this.emit('kicked', {});
       case 'error':
+        // An access refusal is final, so stop the reconnect loop and let the page show the way out.
+        if (msg.code === 'need_login' || msg.code === 'forbidden') this.closed = true;
         return this.emit('error', { message: msg.message, code: msg.code });
       default:
         return undefined;
@@ -108,6 +115,7 @@ export class Session extends EventTarget {
     this.pending = [];
     this.text = msg.text;
     this.files = msg.files ?? this.files;
+    const moved = this.#applyAccess(msg.access);
     this.emit('doc', {
       title: msg.title,
       text: msg.text,
@@ -115,8 +123,23 @@ export class Session extends EventTarget {
       files: this.files,
       users: msg.users,
       isStale,
+      reason: msg.reason,
+      accessChanged: moved,
       carried: isStale && local && local !== msg.text ? makeEdit(msg.text, local) : null,
     });
+  }
+
+  /**
+   * The server sends its answer about my rights with every snapshot, so a share change that
+   * happens while I am typing reaches the surface instead of turning into refused edits.
+   */
+  #applyAccess(access) {
+    if (!access) return false;
+    const before = this.access;
+    this.access = access;
+    this.viewOnly = !access.canEdit;
+    if (!before) return true;
+    return before.role !== access.role || before.canEdit !== access.canEdit || before.canManage !== access.canManage;
   }
 
   #remoteOp(msg) {
@@ -174,15 +197,18 @@ export class Session extends EventTarget {
   /** PUT raw bytes to the attachment endpoint; peers learn about it over the socket. */
   async upload(file) {
     const params = new URLSearchParams({ name: file.name, type: file.type });
-    if (this.name) params.set('who', this.name);
-    const res = await fetch(`/api/docs/${this.docId}/files?${params}`, { method: 'PUT', body: file });
+    const url = `/api/docs/${this.docId}/files?${params}`;
+    const res = await fetch(url, { method: 'PUT', body: file, credentials: 'same-origin' });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error ?? `upload failed (HTTP ${res.status})`);
     return body.file;
   }
 
   async removeFile(fileId) {
-    const res = await fetch(`/api/docs/${this.docId}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+    const res = await fetch(
+      `/api/docs/${this.docId}/files/${encodeURIComponent(fileId)}`,
+      { method: 'DELETE', credentials: 'same-origin' },
+    );
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error ?? `delete failed (HTTP ${res.status})`);
     return body.files;
