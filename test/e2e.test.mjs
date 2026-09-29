@@ -8,32 +8,7 @@ import { Store } from '../server/store.mjs';
 import { apply, makeEdit } from '../shared/ot.mjs';
 import { makeTable, serializeTable } from '../public/js/table.mjs';
 import { MAX_FILES_PER_DOC } from '../server/files.mjs';
-
-function open(url) {
-  const ws = new WebSocket(url);
-  ws.messages = [];
-  const waiters = [];
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    const index = waiters.findIndex((w) => w.test(msg));
-    if (index >= 0) waiters.splice(index, 1)[0].resolve(msg);
-    else ws.messages.push(msg);
-  };
-  ws.waitFor = (test, timeout = 3000) =>
-    new Promise((resolve, reject) => {
-      const existing = ws.messages.findIndex(test);
-      if (existing >= 0) return resolve(ws.messages.splice(existing, 1)[0]);
-      const timer = setTimeout(() => reject(new Error('timed out waiting for a message')), timeout);
-      waiters.push({ test, resolve: (msg) => (clearTimeout(timer), resolve(msg)) });
-    });
-  return new Promise((resolve) => ws.addEventListener('open', () => resolve(ws)));
-}
-
-async function api(base, url, options) {
-  const res = await fetch(`${base}${url}`, options);
-  const body = await res.json().catch(() => ({}));
-  return { status: res.status, body };
-}
+import { Client, openSocket } from './client.mjs';
 
 test('two browsers editing at once converge and survive a restart', async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'doc-e2e-'));
@@ -41,40 +16,47 @@ test('two browsers editing at once converge and survive a restart', async () => 
   const base = `http://127.0.0.1:${app.port}`;
   const wsBase = base.replace('http', 'ws');
   const sessions = [];
+  const alice = new Client(base);
+  const bob = new Client(base);
 
   try {
-    const created = await api(base, '/api/docs', {
-      method: 'POST',
+    await alice.signup('Alice');
+    await bob.signup('Bob');
+    const doc = await alice.createDoc({ title: 'Launch notes', text: 'day one' });
+    assert.equal(doc.owner, (await alice.api('/api/me')).body.user.id);
+    await alice.api(`/api/docs/${doc.id}/access`, {
+      method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Launch notes', text: 'day one' }),
+      body: JSON.stringify({ visibility: 'public', grants: [{ user: (await bob.api('/api/me')).body.user.id, role: 'editor' }] }),
     });
-    assert.equal(created.status, 201);
-    const { doc } = created.body;
 
-    const alice = await open(`${wsBase}/ws?doc=${doc.id}&client=aaaa1111&name=Alice`);
-    const bob = await open(`${wsBase}/ws?doc=${doc.id}&client=bbbb2222&name=Bob`);
-    sessions.push(alice, bob);
+    const a = await alice.open(`${wsBase}/ws?doc=${doc.id}&client=aaaa1111&name=Impostor`);
+    const b = await bob.open(`${wsBase}/ws?doc=${doc.id}&client=bbbb2222&name=Bob`);
+    sessions.push(a, b);
 
-    const a0 = await alice.waitFor((m) => m.type === 'doc');
-    const b0 = await bob.waitFor((m) => m.type === 'doc');
+    const a0 = await a.waitFor((m) => m.type === 'doc');
+    const b0 = await b.waitFor((m) => m.type === 'doc');
     assert.equal(a0.text, 'day one');
+    assert.equal(a0.access.role, 'owner');
+    assert.equal(b0.access.role, 'editor');
+    // A socket is named by its account, never by the ?name= it typed.
     assert.deepEqual(
       b0.users.map((u) => u.name).sort(),
       ['Alice', 'Bob'],
     );
     assert.match(b0.users.find((u) => u.clientId === 'aaaa1111').color, /^#[0-9a-f]{6}$/);
-    await alice.waitFor((m) => m.type === 'users' && m.users.length === 2);
+    await a.waitFor((m) => m.type === 'users' && m.users.length === 2);
 
     // Alice types a suffix, Bob replaces a word from the same starting revision.
-    alice.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: a0.revision, op: makeEdit('day one', 'day one!') }));
-    bob.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: b0.revision, op: makeEdit('day one', 'DAY one') }));
+    a.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: a0.revision, op: makeEdit('day one', 'day one!') }));
+    b.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: b0.revision, op: makeEdit('day one', 'DAY one') }));
 
-    const ackA = await alice.waitFor((m) => m.type === 'ack');
-    const ackB = await bob.waitFor((m) => m.type === 'ack');
+    const ackA = await a.waitFor((m) => m.type === 'ack');
+    const ackB = await b.waitFor((m) => m.type === 'ack');
     assert.notEqual(ackA.revision, ackB.revision);
 
-    const opsForAlice = await alice.waitFor((m) => m.type === 'op' && m.from === 'bbbb2222');
-    const opsForBob = await bob.waitFor((m) => m.type === 'op' && m.from === 'aaaa1111');
+    const opsForAlice = await a.waitFor((m) => m.type === 'op' && m.from === 'bbbb2222');
+    const opsForBob = await b.waitFor((m) => m.type === 'op' && m.from === 'aaaa1111');
     assert.ok(opsForAlice.op.length);
     assert.ok(opsForBob.op.length);
 
@@ -83,29 +65,31 @@ test('two browsers editing at once converge and survive a restart', async () => 
     assert.equal(final.revision, 2);
 
     // Presence: Bob sees Alice's caret move, and both learn about the rename.
-    alice.send(JSON.stringify({ type: 'presence', selection: { start: 3, end: 3 }, typing: true }));
-    const seen = await bob.waitFor((m) => m.type === 'users' && m.users.find((u) => u.clientId === 'aaaa1111')?.typing);
+    a.send(JSON.stringify({ type: 'presence', selection: { start: 3, end: 3 }, typing: true }));
+    const seen = await b.waitFor((m) => m.type === 'users' && m.users.find((u) => u.clientId === 'aaaa1111')?.typing);
     assert.deepEqual(seen.users.find((u) => u.clientId === 'aaaa1111').selection, { start: 3, end: 3 });
 
-    alice.send(JSON.stringify({ type: 'title', title: 'Launch notes v2' }));
-    await bob.waitFor((m) => m.type === 'title');
+    a.send(JSON.stringify({ type: 'title', title: 'Launch notes v2' }));
+    await b.waitFor((m) => m.type === 'title');
 
-    // A view-only peer cannot edit.
-    const carol = await open(`${wsBase}/ws?doc=${doc.id}&client=cccc3333&mode=view`);
+    // An anonymous peer on a public document can read, and nothing else.
+    const carol = await openSocket(`${wsBase}/ws?doc=${doc.id}&client=cccc3333&mode=view`);
     sessions.push(carol);
     const c0 = await carol.waitFor((m) => m.type === 'doc');
+    assert.equal(c0.access.role, 'reader');
+    assert.equal(c0.access.canEdit, false);
     carol.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: c0.revision, op: makeEdit(c0.text, `${c0.text}!`) }));
-    await carol.waitFor((m) => m.type === 'error' && /view-only/.test(m.message));
+    await carol.waitFor((m) => m.type === 'error' && /read-only|view-only/.test(m.message));
 
     // A garbage operation is refused and answered with a resync snapshot.
-    bob.send(JSON.stringify({ type: 'edit', seq: 9, baseRevision: final.revision, op: [{ retain: 999 }] }));
-    const refused = await bob.waitFor((m) => m.type === 'stale');
+    b.send(JSON.stringify({ type: 'edit', seq: 9, baseRevision: final.revision, op: [{ retain: 999 }] }));
+    const refused = await b.waitFor((m) => m.type === 'stale');
     assert.match(refused.reason, /rejected operation/);
     assert.equal(refused.text, 'DAY one!');
 
     await new Promise((resolve) => {
-      bob.addEventListener('close', resolve);
-      bob.close();
+      b.addEventListener('close', resolve);
+      b.close();
     });
 
     await app.store.flush();
@@ -115,7 +99,7 @@ test('two browsers editing at once converge and survive a restart', async () => 
     assert.equal(saved.text, 'DAY one!');
     assert.equal(saved.title, 'Launch notes v2');
 
-    const listed = await api(base, '/api/docs');
+    const listed = await alice.api('/api/docs');
     assert.equal(listed.body.docs[0].revision, 2);
   } finally {
     for (const ws of sessions) ws.close();
@@ -127,11 +111,15 @@ test('the HTTP API guards document ids and unknown routes', async () => {
   const app = await createServer({ dataDir: await mkdtemp(path.join(tmpdir(), 'doc-e2e-')) });
   try {
     const base = `http://127.0.0.1:${app.port}`;
-    assert.equal((await api(base, '/api/docs/..%2F..%2Fetc', { method: 'GET' })).status, 400);
-    assert.equal((await api(base, '/api/docs/does-not-exist', { method: 'GET' })).status, 404);
-    assert.equal((await api(base, '/api/nope', { method: 'GET' })).status, 404);
-    assert.equal((await api(base, '/../package.json', { method: 'GET' })).status, 404);
-    const health = await api(base, '/api/health');
+    const alice = new Client(base);
+    await alice.signup('Alice');
+    const doc = await alice.createDoc({ title: 'guarded' });
+    assert.equal((await alice.api('/api/docs/..%2F..%2Fetc')).status, 400);
+    assert.equal((await alice.api('/api/docs/does-not-exist')).status, 404);
+    assert.equal((await alice.api('/api/nope')).status, 404);
+    assert.equal((await alice.api(`/api/docs/${doc.id}`, { method: 'DELETE' })).body.deleted, true);
+    assert.equal((await alice.send('/../package.json')).status, 404);
+    const health = await alice.api('/api/health');
     assert.equal(health.body.ok, true);
   } finally {
     await app.close();
@@ -147,22 +135,18 @@ test('an upload reaches every peer, serves back byte-exact, and disappears on de
   const dataDir = await mkdtemp(path.join(tmpdir(), 'doc-e2e-'));
   const app = await createServer({ dataDir });
   const base = `http://127.0.0.1:${app.port}`;
+  const dana = new Client(base);
+  await dana.signup('Dana');
   let socket;
 
   try {
-    const created = await api(base, '/api/docs', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Design review', text: 'see the sketch below' }),
-    });
-    const { doc } = created.body;
+    const doc = await dana.createDoc({ title: 'Design review', text: 'see the sketch below' });
 
-    socket = await open(`${base.replace('http', 'ws')}/ws?doc=${doc.id}&client=dddd4444&name=Dana`);
+    socket = await dana.open(`${base.replace('http', 'ws')}/ws?doc=${doc.id}&client=dddd4444`);
     assert.deepEqual((await socket.waitFor((m) => m.type === 'doc')).files, []);
 
-    const uploaded = await api(
-      base,
-      `/api/docs/${doc.id}/files?name=${encodeURIComponent('sketch v2.png')}&type=image/png&who=Dana`,
+    const uploaded = await dana.api(
+      `/api/docs/${doc.id}/files?name=${encodeURIComponent('sketch v2.png')}&type=image/png&who=Somebody Else`,
       { method: 'PUT', body: PNG },
     );
     assert.equal(uploaded.status, 201);
@@ -172,10 +156,11 @@ test('an upload reaches every peer, serves back byte-exact, and disappears on de
 
     const pushed = await socket.waitFor((m) => m.type === 'files' && m.files.length === 1);
     assert.equal(pushed.files[0].id, file.id);
+    // The uploader is the account, whatever the query string claimed.
     assert.equal(pushed.files[0].by, 'Dana');
-    assert.deepEqual((await api(base, `/api/docs/${doc.id}/files`)).body.files, pushed.files);
+    assert.deepEqual((await dana.api(`/api/docs/${doc.id}/files`)).body.files, pushed.files);
 
-    const served = await fetch(`${base}/files/${doc.id}/${file.id}/sketch.png`);
+    const served = await dana.send(`/files/${doc.id}/${file.id}/sketch.png`);
     assert.equal(served.status, 200);
     assert.equal(served.headers.get('content-type'), 'image/png');
     assert.match(served.headers.get('content-disposition'), /^inline; filename="sketch v2\.png"/);
@@ -183,11 +168,11 @@ test('an upload reaches every peer, serves back byte-exact, and disappears on de
     assert.deepEqual(Buffer.from(await served.arrayBuffer()), PNG);
 
     // Anything outside the inline allowlist comes back as a download, never as a page.
-    const hostile = await api(base, `/api/docs/${doc.id}/files?name=page.html&type=text/html`, {
+    const hostile = await dana.api(`/api/docs/${doc.id}/files?name=page.html&type=text/html`, {
       method: 'PUT',
       body: Buffer.from('<script>alert(1)</script>'),
     });
-    const hostileRes = await fetch(`${base}/files/${doc.id}/${hostile.body.file.id}`);
+    const hostileRes = await dana.send(`/files/${doc.id}/${hostile.body.file.id}`);
     assert.equal(hostileRes.headers.get('content-type'), 'application/octet-stream');
     assert.match(hostileRes.headers.get('content-disposition'), /^attachment/);
 
@@ -204,18 +189,20 @@ test('an upload reaches every peer, serves back byte-exact, and disappears on de
     await socket.waitFor((m) => m.type === 'ack');
     assert.ok(app.hub.snapshot(doc.id).text.includes(reference));
 
-    assert.equal((await api(base, `/api/docs/${doc.id}/files/..%2Fescape`, { method: 'DELETE' })).status, 400);
-    assert.equal((await api(base, '/api/docs/no-such-doc/files', { method: 'PUT', body: PNG })).status, 404);
+    assert.equal((await dana.api(`/api/docs/${doc.id}/files/..%2Fescape`, { method: 'DELETE' })).status, 400);
+    assert.equal((await dana.api('/api/docs/no-such-doc/files', { method: 'PUT', body: PNG })).status, 404);
+    // A signed-out browser cannot read the attachment of a private document.
+    assert.equal((await fetch(`${base}/files/${doc.id}/${file.id}`)).status, 403);
 
-    const afterDelete = await api(base, `/api/docs/${doc.id}/files/${file.id}`, { method: 'DELETE' });
+    const afterDelete = await dana.api(`/api/docs/${doc.id}/files/${file.id}`, { method: 'DELETE' });
     assert.equal(afterDelete.status, 200);
     assert.equal(afterDelete.body.files.length, 1);
     await socket.waitFor((m) => m.type === 'files' && m.files.length === 1);
-    assert.equal((await fetch(`${base}/files/${doc.id}/${file.id}`)).status, 404);
+    assert.equal((await dana.send(`/files/${doc.id}/${file.id}`)).status, 404);
     assert.equal(await app.files.stat(doc.id, file.id), null);
     assert.ok(await app.files.stat(doc.id, hostile.body.file.id));
 
-    assert.equal((await api(base, `/api/docs/${doc.id}`, { method: 'DELETE' })).body.deleted, true);
+    assert.equal((await dana.api(`/api/docs/${doc.id}`, { method: 'DELETE' })).body.deleted, true);
     assert.equal(await app.files.stat(doc.id, hostile.body.file.id), null);
   } finally {
     socket?.close();
@@ -225,13 +212,10 @@ test('an upload reaches every peer, serves back byte-exact, and disappears on de
 
 test('the per-document attachment count is capped', async () => {
   const app = await createServer({ dataDir: await mkdtemp(path.join(tmpdir(), 'doc-e2e-')) });
-  const base = `http://127.0.0.1:${app.port}`;
+  const dana = new Client(`http://127.0.0.1:${app.port}`);
   try {
-    const { doc } = (await api(base, '/api/docs', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Crowded', text: 'x' }),
-    })).body;
+    await dana.signup('Dana');
+    const doc = await dana.createDoc({ title: 'Crowded', text: 'x' });
     app.store.update(doc.id, (target) => {
       target.files = Array.from({ length: MAX_FILES_PER_DOC }, (_, i) => ({
         id: `f${i}`,
@@ -241,7 +225,7 @@ test('the per-document attachment count is capped', async () => {
         at: 0,
       }));
     });
-    const rejected = await api(base, `/api/docs/${doc.id}/files?name=one-more.txt&type=text/plain`, {
+    const rejected = await dana.api(`/api/docs/${doc.id}/files?name=one-more.txt&type=text/plain`, {
       method: 'PUT',
       body: Buffer.from('bytes'),
     });
@@ -258,26 +242,31 @@ test('a table built and widened in the grid reaches a peer as an ordinary edit',
   const base = `http://127.0.0.1:${app.port}`;
   const wsBase = base.replace('http', 'ws');
   const sessions = [];
+  const alice = new Client(base);
+  const bob = new Client(base);
 
   try {
-    const created = await api(base, '/api/docs', {
-      method: 'POST',
+    await alice.signup('Alice');
+    await bob.signup('Bob');
+    const doc = await alice.createDoc({ title: 'Inventory', text: '## stock\n' });
+    const bobId = (await bob.api('/api/me')).body.user.id;
+    await alice.api(`/api/docs/${doc.id}/access`, {
+      method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Inventory', text: '## stock\n' }),
+      body: JSON.stringify({ grants: [{ user: bobId, role: 'editor' }] }),
     });
-    const { doc } = created.body;
 
-    const alice = await open(`${wsBase}/ws?doc=${doc.id}&client=eeee5555&name=Alice`);
-    const bob = await open(`${wsBase}/ws?doc=${doc.id}&client=ffff6666&name=Bob`);
-    sessions.push(alice, bob);
-    const a0 = await alice.waitFor((m) => m.type === 'doc');
-    await bob.waitFor((m) => m.type === 'doc');
+    const a = await alice.open(`${wsBase}/ws?doc=${doc.id}&client=eeee5555`);
+    const b = await bob.open(`${wsBase}/ws?doc=${doc.id}&client=ffff6666`);
+    sessions.push(a, b);
+    const a0 = await a.waitFor((m) => m.type === 'doc');
+    await b.waitFor((m) => m.type === 'doc');
 
     // Alice picks 3x2 in the picker: insertTable() drops the block in and sends one edit.
     const state = makeTable(3, 2);
     const withTable = `${a0.text}\n${serializeTable(state)}\n`;
-    alice.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: a0.revision, op: makeEdit(a0.text, withTable) }));
-    const inserted = await bob.waitFor((m) => m.type === 'op');
+    a.send(JSON.stringify({ type: 'edit', seq: 1, baseRevision: a0.revision, op: makeEdit(a0.text, withTable) }));
+    const inserted = await b.waitFor((m) => m.type === 'op');
     assert.equal(apply(a0.text, inserted.op), withTable);
 
     // Bob clicks a header cell and presses "+col": the grid gains a cell per row, and what
@@ -289,8 +278,8 @@ test('a table built and widened in the grid reaches a peer as an ordinary edit',
     };
     // He then types into the first header cell, which re-pads that column.
     const typed = serializeTable({ ...widened, header: ['item', ...widened.header.slice(1)] });
-    bob.send(JSON.stringify({ type: 'edit', seq: 2, baseRevision: inserted.revision, op: makeEdit(withTable, typed) }));
-    const echoed = await alice.waitFor((m) => m.type === 'op' && m.from === 'ffff6666');
+    b.send(JSON.stringify({ type: 'edit', seq: 2, baseRevision: inserted.revision, op: makeEdit(withTable, typed) }));
+    const echoed = await a.waitFor((m) => m.type === 'op' && m.from === 'ffff6666');
 
     assert.equal(apply(withTable, echoed.op), typed);
     assert.equal(app.hub.snapshot(doc.id).text, typed);

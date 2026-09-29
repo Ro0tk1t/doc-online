@@ -50,6 +50,20 @@ export function assertTitle(title, maxChars = 200) {
   return cleaned.slice(0, maxChars);
 }
 
+/** An access record read off disk: anything malformed degrades to "private, nobody shared it". */
+export function normalizeAccess(doc) {
+  const grants = Array.isArray(doc.grants)
+    ? doc.grants
+        .filter((entry) => typeof entry?.user === 'string' && ['editor', 'viewer'].includes(entry.role))
+        .map((entry) => ({ user: entry.user, role: entry.role }))
+    : [];
+  return {
+    owner: typeof doc.owner === 'string' ? doc.owner : null,
+    visibility: doc.visibility === 'public' ? 'public' : 'private',
+    grants,
+  };
+}
+
 /** Temp file in, rename after: a crash can never leave a half-written file behind. */
 export async function writeFileAtomic(target, body) {
   const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
@@ -88,6 +102,7 @@ export class Store {
         const doc = JSON.parse(raw);
         this.docs.set(doc.id, {
           ...doc,
+          ...normalizeAccess(doc),
           files: Array.isArray(doc.files) ? doc.files : [],
           updatedAt: doc.updatedAt ?? Date.now(),
         });
@@ -100,13 +115,16 @@ export class Store {
 
   list() {
     return [...this.docs.values()]
-      .map(({ id, title, revision, files, createdAt, updatedAt }) => ({
+      .map(({ id, title, revision, files, createdAt, updatedAt, owner, visibility, grants }) => ({
         id,
         title,
         revision,
         fileCount: (files ?? []).length,
         createdAt,
         updatedAt,
+        owner,
+        visibility,
+        grants,
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
@@ -115,7 +133,7 @@ export class Store {
     return this.docs.get(assertDocId(id)) ?? null;
   }
 
-  create({ title, text = '', id = newId() }) {
+  create({ title, text = '', id = newId(), owner = null }) {
     const now = Date.now();
     const doc = {
       id: assertDocId(id),
@@ -123,10 +141,24 @@ export class Store {
       text: assertText(text),
       revision: 0,
       files: [],
+      owner: typeof owner === 'string' ? owner : null,
+      visibility: 'private',
+      grants: [],
       createdAt: now,
       updatedAt: now,
     };
     this.docs.set(doc.id, doc);
+    this.#persist(doc.id);
+    return doc;
+  }
+
+  /** Replace a document's visibility and share list. The caller has already checked authority. */
+  setAccess(id, { visibility, grants }) {
+    const doc = this.get(id);
+    if (!doc) return null;
+    if (visibility !== undefined) doc.visibility = visibility;
+    if (grants !== undefined) doc.grants = grants;
+    doc.updatedAt = Date.now();
     this.#persist(doc.id);
     return doc;
   }

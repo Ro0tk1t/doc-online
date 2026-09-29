@@ -5,13 +5,17 @@
  *
  *   client -> server  edit {seq, baseRevision, op} | presence {selection, typing}
  *                     title {title} | resync | ping
- *   server -> client  doc (snapshot, incl. files) | ack {seq, revision, length}
+ *   server -> client  doc (snapshot, incl. files and my access) | ack {seq, revision, length}
  *                     op (peer edit) | users | title | files | stale {…} | kicked | error
+ *
+ * Every snapshot carries the reading this socket has of the document, because two people can
+ * look at the same room with different rights. The client never decides its own permissions.
  *
  * Attachments travel out of band: bytes go over the REST endpoint, and the hub only
  * fans out the resulting metadata list.
  */
 
+import { canEdit, canManage, roleFor } from './access.mjs';
 import { NotFound, Rejected, Room } from './room.mjs';
 import { assertDocId, assertTitle } from './store.mjs';
 
@@ -96,7 +100,7 @@ export class Hub {
     return this.rooms.get(docId)?.presence() ?? [];
   }
 
-  attach(ws, params) {
+  attach(ws, params, viewer = null) {
     const docId = params.get('doc');
     const clientId = params.get('client');
     if (!docId || !clientId || !CLIENT_ID.test(clientId)) {
@@ -113,7 +117,18 @@ export class Hub {
       return;
     }
 
-    const viewOnly = params.get('mode') === 'view';
+    const role = roleFor(room.doc, viewer);
+    if (!role) {
+      // 4003 says "your rights do not cover this", which is a reason to stop reconnecting.
+      send(ws, {
+        type: 'error',
+        code: viewer ? 'forbidden' : 'need_login',
+        message: viewer ? 'you do not have access to this document' : 'sign in to open this document',
+      });
+      ws.close(4003, viewer ? 'forbidden' : 'login required');
+      return;
+    }
+
     const prior = room.clients.get(clientId);
     if (prior) {
       send(prior.ws, { type: 'kicked' });
@@ -125,16 +140,24 @@ export class Hub {
     }
     const client = {
       clientId,
-      name: cleanName(params.get('name'), `Guest ${clientId.slice(0, 4)}`),
+      // A signed-in peer is named by their account, never by the query string: an identity you
+      // get to type is an identity you get to fake.
+      name: viewer
+        ? cleanName(viewer.name, 'Anonymous')
+        : cleanName(params.get('name'), `Guest ${clientId.slice(0, 4)}`),
       color: colorFor(clientId),
-      role: viewOnly ? 'viewer' : 'editor',
+      // ?mode=view is still honoured, so a read-only link stays read-only for an editor too.
+      intent: params.get('mode') === 'view' ? 'view' : 'edit',
+      viewer,
+      docRole: role,
+      role: canEdit(role) && params.get('mode') !== 'view' ? 'editor' : 'viewer',
       selection: null,
       typing: false,
       ws,
     };
     room.join(client);
 
-    send(ws, { type: 'doc', ...room.snapshot(), users: room.presence() });
+    this.#snapshotTo(room, client, 'doc');
     this.#announce(room);
 
     ws.on('message', (raw) => this.#onMessage(ws, room, client, raw));
@@ -164,7 +187,7 @@ export class Hub {
         case 'title':
           return this.#rename(room, client, msg.title);
         case 'resync':
-          return send(ws, { type: 'doc', ...room.snapshot(), users: room.presence() });
+          return this.#snapshotTo(room, client, 'doc');
         case 'ping':
           return send(ws, { type: 'pong', at: msg.at });
         default:
@@ -172,7 +195,7 @@ export class Hub {
       }
     } catch (err) {
       if (err instanceof Rejected) {
-        if (err.resync) return send(ws, { type: 'stale', ...room.snapshot(), reason: err.message });
+        if (err.resync) return this.#snapshotTo(room, client, 'stale', err.message);
         return send(ws, { type: 'error', message: err.message });
       }
       console.error('doc-online: message handler failed:', err);
@@ -181,7 +204,9 @@ export class Hub {
   }
 
   #edit(room, client, msg) {
-    if (client.role === 'viewer') throw new Rejected('view-only links cannot edit');
+    if (client.role === 'viewer') {
+      throw new Rejected(client.intent === 'view' ? 'view-only links cannot edit' : 'this document is read-only for you');
+    }
     const entry = room.commit(client.clientId, msg.seq, msg.baseRevision, msg.op);
     send(client.ws, { type: 'ack', seq: msg.seq, revision: entry.revision, length: room.text.length });
     this.#broadcast(room, client, { type: 'op', from: client.clientId, revision: entry.revision, op: entry.op });
@@ -199,7 +224,9 @@ export class Hub {
   }
 
   #rename(room, client, title) {
-    if (client.role === 'viewer') throw new Rejected('view-only links cannot rename');
+    if (client.role === 'viewer') {
+      throw new Rejected(client.intent === 'view' ? 'view-only links cannot rename' : 'only an editor can rename this document');
+    }
     const next = assertTitle(title);
     if (!room.setTitle(next)) return;
     this.#broadcast(room, null, { type: 'title', title: next });
@@ -221,6 +248,46 @@ export class Hub {
     if (room) this.#broadcast(room, null, { type: 'files', files: list ?? [] });
   }
 
+  /**
+   * The share list or the visibility changed: every open socket re-reads its own rights.
+   * Someone who lost access is disconnected; everyone else gets a fresh snapshot, marked
+   * `stale` so the client drops its unacknowledged edits and repaints with the new role.
+   */
+  accessChanged(docId) {
+    const room = this.rooms.get(assertDocId(docId));
+    if (!room) return;
+    const doc = this.store.get(room.id);
+    if (doc) room.doc = doc;
+    for (const client of [...room.clients.values()]) {
+      const role = roleFor(room.doc, client.viewer);
+      if (!role) {
+        room.leave(client.clientId);
+        send(client.ws, { type: 'error', code: 'forbidden', message: 'you no longer have access to this document' });
+        try {
+          client.ws.close(4003, 'access revoked');
+        } catch {
+          /* already closing */
+        }
+        continue;
+      }
+      client.docRole = role;
+      client.role = canEdit(role) && client.intent !== 'view' ? 'editor' : 'viewer';
+      this.#snapshotTo(room, client, 'stale', 'sharing changed');
+    }
+    this.#announce(room);
+  }
+
+  /** A full snapshot for one socket: the document is shared, the reading of it is not. */
+  #snapshotTo(room, client, type, reason) {
+    send(client.ws, {
+      type,
+      ...room.snapshot(),
+      access: rightsOf(client),
+      users: room.presence(),
+      ...(reason ? { reason } : {}),
+    });
+  }
+
   /** Push a snapshot-style change made through the HTTP API into open rooms. */
   refresh(docId) {
     const room = this.rooms.get(docId);
@@ -228,10 +295,27 @@ export class Hub {
     const doc = this.store.get(docId);
     room.doc = doc;
     room.opLog = [];
-    this.#broadcast(room, null, { type: 'stale', ...room.snapshot(), reason: 'document reloaded on the server' });
+    for (const client of room.clients.values()) {
+      const role = roleFor(doc, client.viewer);
+      client.docRole = role;
+      client.role = canEdit(role) && client.intent !== 'view' ? 'editor' : 'viewer';
+      this.#snapshotTo(room, client, 'stale', 'document reloaded on the server');
+    }
   }
 }
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(Math.trunc(n), max));
+}
+
+/** The access block one socket is allowed to know about itself. */
+function rightsOf(client) {
+  return {
+    role: client.docRole,
+    // `canEdit` is what this socket may do: a document role of editor plus a read-only link
+    // still means no writes, and the client must not have to work that out itself.
+    canEdit: client.role === 'editor',
+    canManage: canManage(client.docRole),
+    intent: client.intent,
+  };
 }

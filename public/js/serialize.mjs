@@ -24,6 +24,8 @@ const HEADINGS = { H1: 1, H2: 2, H3: 3, H4: 4, H5: 5, H6: 6 };
 const WRAP = { STRONG: '**', B: '**', EM: '*', I: '*', DEL: '~~', S: '~~', STRIKE: '~~', MARK: '==' };
 const BLOCK = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'UL', 'OL', 'PRE', 'HR', 'TABLE']);
 const CELL = new Set(['TD', 'TH']);
+/** What the browser turns a line of a fence into when it splits one: a block child, not a break. */
+const LINE_BLOCK = new Set(['DIV', 'P']);
 /** A root that holds blocks rather than being one: it is walked, never marked. */
 const CONTAINER = new Set(['DIV', 'P', 'SECTION', 'ARTICLE', 'MAIN', 'BODY']);
 
@@ -33,6 +35,9 @@ const isText = (node) => node.nodeType === 3;
 const isElement = (node) => node.nodeType === 1;
 const textOf = (node) =>
   kids(node).reduce((acc, child) => acc + (isText(child) ? String(child.data ?? '') : isElement(child) && tag(child) !== 'BR' ? textOf(child) : tag(child) === 'BR' ? '\n' : ''), '');
+
+/** Text a span has to say for itself: line breaks inside it belong to the block, not the span. */
+const spanText = (node) => textOf(node).replace(/\n/g, '');
 
 /** Placeholders and decorations are not content: they must never reach the model. */
 function dropped(node) {
@@ -59,6 +64,7 @@ class Writer {
     this.fresh = true; // nothing but a line break has been written yet
     this.edge = 0; // where the current block's content starts
     this.skip = 0; // leading whitespace the surrounding markup already supplies
+    this.inlineCode = false; // inside an inline span, a line break has nowhere to go
   }
 
   raw(text) {
@@ -85,14 +91,19 @@ class Writer {
   }
 
   /** Break the current line. Outside fenced code a break never doubles up. */
-  nl(breaks = 1) {
+  nl(breaks = 1, node = null) {
     if (this.mode === 'cell') {
       if (breaks > 0 && this.tail !== ' ' && !this.fresh) this.raw(' ');
       return;
     }
     let count = breaks;
     if (this.mode !== 'code' && this.fresh) count -= 1; // an absorbed break, e.g. <br> then '\n'
+    // A break a fence keeps is a position the caret can sit on, so it is worth marking: the browser
+    // splits a typed line with `<br>`, and a caret resting on one of those resolved to the end of
+    // the text before it -- a line too early, inside code that had already been written.
+    const entry = count > 0 ? this.begin(node) : null;
     for (let i = 0; i < count; i += 1) this.breakLine();
+    this.close(entry);
   }
 
   gapLine() {
@@ -111,6 +122,12 @@ class Writer {
     }
     if (this.mode === 'cell') {
       this.raw(value.replace(/\s+/g, ' ').replace(/\|/g, '\\|'));
+      return;
+    }
+    if (this.inlineCode) {
+      // Markdown gives an inline span no line break to hold, so the seam becomes a space rather
+      // than a newline the renderer could never read back.
+      this.raw(value.replace(/\n+/g, ' '));
       return;
     }
     const lines = value.split('\n');
@@ -205,9 +222,17 @@ function inline(nodes, w) {
       continue;
     }
     if (name === 'CODE') {
+      // A span with no text of its own is not something Markdown can say: bare backticks read as a
+      // code span that never closes, which is what the empty `<code>` a line break leaves behind
+      // used to write. Its line breaks are placeholders for the block, not content, so they count
+      // as nothing here.
+      if (!spanText(child)) continue;
       w.raw('`');
       const entry = w.begin(child);
+      const wasInline = w.inlineCode;
+      w.inlineCode = true; // this is the span form: a fence reaches here through `fence`, not here
       plain(child, w);
+      w.inlineCode = wasInline;
       w.close(entry);
       w.raw('`');
       continue;
@@ -237,13 +262,20 @@ function inline(nodes, w) {
 
 /** Text descendants, verbatim, each marked -- used for code spans and fenced blocks. */
 function plain(node, w) {
+  // A fence body the browser split into `<div>` lines keeps its breaks in those elements: the
+  // lines are separated by the blocks themselves, not by a `<br>` or a newline character.
+  const fencing = w.mode === 'code';
+  let previousBlock = false;
   for (const child of kids(node)) {
+    const blockish = isElement(child) && LINE_BLOCK.has(tag(child));
+    if (fencing && (blockish || previousBlock) && !w.atLineStart()) w.nl();
+    previousBlock = blockish;
     if (isText(child)) {
       const entry = w.begin(child);
       w.text(child.data);
       w.close(entry);
     } else if (isElement(child)) {
-      if (tag(child) === 'BR') w.nl();
+      if (tag(child) === 'BR') w.nl(1, child);
       else plain(child, w);
     }
   }
