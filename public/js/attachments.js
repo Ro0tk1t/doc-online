@@ -44,15 +44,22 @@ export class Attachments {
     this.list = document.getElementById('files');
     this.empty = document.getElementById('filesEmpty');
     this.count = document.getElementById('files-count');
-    this.input = document.getElementById('attach');
     this.pending = 0;
+
+    // Both pickers are the same upload; `accept="image/*"` is only what the dialog offers, so the
+    // image one checks the files it got as well -- a picker that says images must not store a .zip.
+    for (const [picker, imagesOnly] of [
+      [document.getElementById('attach'), false],
+      [document.getElementById('image'), true],
+    ]) {
+      picker.addEventListener('change', () => {
+        this.#pick([...picker.files], imagesOnly);
+        picker.value = ''; // picking the same file twice must ask again
+      });
+    }
 
     document.getElementById('files-toggle').addEventListener('click', () => this.toggle());
     document.getElementById('files-close').addEventListener('click', () => this.open(false));
-    this.input.addEventListener('change', () => {
-      this.upload([...this.input.files]);
-      this.input.value = '';
-    });
     this.list.addEventListener('click', (event) => this.#act(event));
 
     // Dropped and pasted files are refused by `upload`, not by leaving the handlers unwired:
@@ -99,6 +106,14 @@ export class Attachments {
     // Brackets and newlines would break the Markdown link the name is embedded in.
     const label = String(file.name ?? 'file').replace(/[[\]\n\r]/g, ' ').trim() || 'file';
     return isImage(file) ? `![${label}](${url})` : `[📎 ${label}](${url})`;
+  }
+
+  /** What a picker handed over. The image one keeps only images, and says when it dropped some. */
+  #pick(chosen, imagesOnly) {
+    if (!imagesOnly) return this.upload(chosen);
+    const pictures = chosen.filter(isImage);
+    if (pictures.length !== chosen.length) this.notify('Images only here — other files go through attach.', 'info');
+    return pictures.length ? this.upload(pictures) : Promise.resolve([]);
   }
 
   async upload(list) {

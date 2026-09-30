@@ -595,6 +595,7 @@ const ACTIONS = {
   divider: () => insertMarkdown('---\n'),
   codeblock: toCodeBlock,
   table: toggleTablePicker,
+  image: () => el('image').click(),
   attach: () => el('attach').click(),
 };
 
